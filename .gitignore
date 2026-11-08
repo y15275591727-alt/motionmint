@@ -1,0 +1,21 @@
+﻿node_modules/
+dist/
+.env
+*.log
+
+# Secrets and local data - never commit
+.env.*
+!.env.example
+data/admin-token.txt
+data/*.db
+data/*.db-*
+data/*.sqlite
+data/*.sqlite-*
+data/*.sqlite3
+data/*.sqlite3-*
+
+# Local tooling and reference captures
+.playwright-mcp/
+APEI_CODEX_*
+APEI_VIGGLE_*
+viggle-*.png

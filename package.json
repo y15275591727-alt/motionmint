@@ -1,0 +1,30 @@
+{
+  "name": "motionmint",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"vite --configLoader runner --host 0.0.0.0\" \"node server/index.js\"",
+    "client": "vite --configLoader runner --host 0.0.0.0",
+    "server": "node server/index.js",
+    "test": "node --test",
+    "build": "vite build --configLoader runner",
+    "start": "node server/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "lucide-react": "^0.545.0",
+    "multer": "^2.0.2",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "stripe": "^23.1.0",
+    "viem": "^2.57.16"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.0.4",
+    "concurrently": "^9.2.1",
+    "vite": "^7.1.12"
+  }
+}

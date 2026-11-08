@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: motionmint
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: APP_URL
+        sync: false
+      - key: NODE_VERSION
+        value: "22"
+      - key: VIGGLE_API_KEY
+        sync: false
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: ADMIN_TOKEN
+        sync: false
