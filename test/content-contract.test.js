@@ -18,6 +18,14 @@ test("landing copy uses the locked MotionMint message", () => {
   assert.match(app, /primary:\s*"创作视频"/);
 });
 
+test("footer uses the same mint primary action as the homepage", () => {
+  const app = read("src/App.jsx");
+  const footer = app.slice(app.indexOf("function Footer("), app.indexOf("function Landing("));
+
+  assert.match(footer, /className="button button-primary button-large"/);
+  assert.match(footer, /\{copy\.action\}/);
+});
+
 test("public navigation and utility links do not promise unavailable destinations", () => {
   const app = read("src/App.jsx");
   const i18n = read("src/i18n.js");
@@ -39,13 +47,13 @@ test("public navigation and utility links do not promise unavailable destination
   assert.match(i18n, /"community-rules":\s*\{/);
 });
 
-test("scene remake reports credits without consuming the free-trial message", () => {
+test("scene remake uses a neutral free-trial notice instead of a red credits error", () => {
   const app = read("src/App.jsx");
   const i18n = read("src/i18n.js");
 
-  assert.match(app, /trialWorkflow \? copy\.trialExpired : copy\.creditsRequired/);
-  assert.match(i18n, /creditsRequired:\s*"This tool requires credits\./);
-  assert.match(i18n, /creditsRequired:\s*"此工具需要积分。/);
+  assert.match(app, /!canAfford && !loading && !isSceneRemake/);
+  assert.match(app, /<p className="form-note">\{copy\.sceneRemakeTrialNote\}<\/p>/);
+  assert.match(i18n, /sceneRemakeTrialNote:\s*"Scene Remake is not included in the free trial\."/);
 });
 
 test("public surfaces use MotionMint model and live/demo wording", () => {

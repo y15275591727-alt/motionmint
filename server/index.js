@@ -10,6 +10,7 @@ import { Readable } from "node:stream";
 import Stripe from "stripe";
 import { verifyMessage } from "viem";
 import { createViggleJob, readViggleJob } from "./viggle.js";
+import { clientGenerationError } from "./generation-errors.js";
 import {
   addCredits,
   attachReferral,
@@ -324,6 +325,57 @@ function getAuthorizedJob(id, token, session) {
   return null;
 }
 
+function safeErrorMessage(error, fallback = "The render could not be completed.") {
+  const message = String(error?.message || "")
+    .replace(/https?:\/\/\S+/gi, "[redacted]")
+    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+    .trim()
+    .slice(0, 240);
+  return message || fallback;
+}
+
+function serializeStoredJob(job) {
+  let result = null;
+  try {
+    result = job.result_json ? JSON.parse(job.result_json) : null;
+  } catch {
+    result = null;
+  }
+  const { result_json: _resultJson, provider_id: _providerId, ...safeItem } = job;
+  return {
+    ...safeItem,
+    video_url: result?.video_url || null,
+    images: result?.images || [],
+    error: result?.error || null
+  };
+}
+
+async function refreshProviderJob(job, { allowTerminal = false } = {}) {
+  if (job.mode !== "live" || !job.provider_id) return null;
+  if (!allowTerminal && ["ready", "failed"].includes(job.status)) return null;
+  const providerJob = await readViggleJob({
+    apiKey,
+    providerId: job.provider_id,
+    kind: job.kind
+  });
+  const providerProgress = Number.isFinite(Number(providerJob.progress))
+    ? Number(providerJob.progress)
+    : Number(job.progress || 0);
+  const providerStage = providerJob.stage || providerJob.status || job.stage || "queued";
+  const terminal = providerJob.status === "ready" || providerJob.status === "failed";
+  updateJob(job.id, {
+    status: providerJob.status,
+    progress: providerProgress,
+    stage: providerStage,
+    ...(terminal ? { resultJson: JSON.stringify(providerJob) } : {})
+  });
+  job.status = providerJob.status;
+  job.progress = providerProgress;
+  job.stage = providerStage;
+  if (terminal) job.result_json = JSON.stringify(providerJob);
+  return providerJob;
+}
+
 function requireAdmin(request, response, next) {
   const bearer = String(request.get("authorization") || "").replace(/^Bearer\s+/i, "");
   if (!bearer || bearer !== adminToken) {
@@ -347,7 +399,7 @@ app.get("/api/status", (_request, response) => {
 app.get("/api/config", (_request, response) => {
   response.json({
     googleOAuth: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
-    wallet: true,
+    wallet: process.env.WALLET_AUTH_ENABLED === "true",
     stripe: Boolean(stripe),
     subscriptions: {
       creator: Boolean(process.env.STRIPE_PRICE_CREATOR),
@@ -586,113 +638,133 @@ app.post(
     const localId = `mm_${randomBytes(18).toString("base64url")}`;
     const createdAt = Date.now();
     const kind = workflow === "image" ? "images" : "video";
+    const mode = apiKey ? "live" : "demo";
+    const initialStatus = apiKey ? "processing" : "queued";
+    const initialStage = apiKey ? "analyzing" : "queued";
 
-    if (!apiKey) {
-      createJob({
-        id: localId,
-        ownerSession: token,
-        userId: reservation.userId,
-        workflow,
-        kind,
-        mode: "demo",
-        status: "queued",
-        progress: 0,
-        stage: "queued",
-        poster: demoPosters[workflow] || demoPosters.mix,
-        prompt: request.body.prompt || "",
-        aspectRatio: request.body.aspect || "16:9",
-        resolution: request.body.displayResolution || request.body.resolution || "",
-        createdAt
-      });
+    createJob({
+      id: localId,
+      ownerSession: token,
+      userId: reservation.userId,
+      workflow,
+      kind,
+      mode,
+      status: initialStatus,
+      progress: 0,
+      stage: initialStage,
+      poster: demoPosters[workflow] || demoPosters.mix,
+      prompt: request.body.prompt || "",
+      aspectRatio: request.body.aspect || "16:9",
+      resolution: request.body.displayResolution || request.body.resolution || "",
+      createdAt
+    });
+
+    if (mode === "demo") {
       awardReferralForGeneration(reservation.userId);
       return response.status(202).json({
         id: localId,
-        status: "queued",
+        status: initialStatus,
         progress: 0,
-        mode: "demo",
+        stage: initialStage,
+        mode,
+        workflow,
+        created_at: createdAt,
         usage: reservation,
         session: publicSession(session)
       });
     }
 
-    try {
-      const forwardedFiles = request.files || {};
-      if (
-        ["mix", "motion", "remake"].includes(workflow) &&
-        !forwardedFiles.motion?.[0] &&
-        MOTION_TEMPLATE_FILES.has(String(request.body.templateMotion || ""))
-      ) {
-        const templateName = String(request.body.templateMotion);
-        forwardedFiles.motion = [{
-          buffer: fs.readFileSync(path.join(projectRoot, "public", "videos", templateName)),
-          originalname: templateName,
-          mimetype: "video/mp4"
-        }];
-      }
-      const providerJob = await createViggleJob({
-        apiKey,
-        workflow,
-        prompt: request.body.prompt,
-        fields: request.body,
-        files: forwardedFiles
-      });
-      createJob({
-        id: localId,
-        ownerSession: token,
-        userId: reservation.userId,
-        workflow,
-        kind: providerJob.kind || kind,
-        mode: "live",
-        providerId: providerJob.id,
-        status: providerJob.status || "queued",
-        progress: providerJob.progress || 0,
-        stage: providerJob.stage || "queued",
-        prompt: request.body.prompt || "",
-        aspectRatio: request.body.aspect || "16:9",
-        resolution: request.body.displayResolution || request.body.resolution || "",
-        createdAt
-      });
-      awardReferralForGeneration(reservation.userId);
-      response.status(202).json({
-        id: localId,
-        status: providerJob.status || "queued",
-        progress: providerJob.progress || 0,
-        mode: "live",
-        usage: reservation,
-        session: publicSession(session)
-      });
-    } catch (error) {
-      rollbackUse(reservation);
-      response.status(400).json({ error: error.message });
-    }
+    response.status(202).json({
+      id: localId,
+      status: initialStatus,
+      progress: 0,
+      stage: initialStage,
+      mode,
+      workflow,
+      created_at: createdAt,
+      usage: reservation,
+      session: publicSession(session)
+    });
+
+    setImmediate(() => {
+      void (async () => {
+        try {
+          const forwardedFiles = request.files || {};
+          if (
+            ["mix", "motion", "remake"].includes(workflow) &&
+            !forwardedFiles.motion?.[0] &&
+            MOTION_TEMPLATE_FILES.has(String(request.body.templateMotion || ""))
+          ) {
+            const templateName = String(request.body.templateMotion);
+            forwardedFiles.motion = [{
+              buffer: fs.readFileSync(path.join(projectRoot, "public", "videos", templateName)),
+              originalname: templateName,
+              mimetype: "video/mp4"
+            }];
+          }
+          const providerJob = await createViggleJob({
+            apiKey,
+            workflow,
+            prompt: request.body.prompt,
+            fields: request.body,
+            files: forwardedFiles
+          });
+          if (providerJob.status === "failed") {
+            throw new Error(providerJob.error?.message || "The render could not be started.");
+          }
+          if (!providerJob.id) throw new Error("The render provider did not return a job identifier.");
+          const providerProgress = Number.isFinite(Number(providerJob.progress))
+            ? Number(providerJob.progress)
+            : 0;
+          const providerStage = providerJob.stage || providerJob.status || "queued";
+          const terminal = providerJob.status === "ready" || providerJob.status === "failed";
+          updateJob(localId, {
+            providerId: providerJob.id,
+            status: providerJob.status || "queued",
+            progress: providerProgress,
+            stage: providerStage,
+            ...(terminal ? { resultJson: JSON.stringify(providerJob) } : {})
+          });
+          awardReferralForGeneration(reservation.userId);
+        } catch (error) {
+          const safeError = clientGenerationError(error);
+          const operatorMessage = safeErrorMessage(error, "The render could not be started.");
+          console.error(`[generate] Job ${localId} could not start: ${operatorMessage}`);
+          updateJob(localId, {
+            status: "failed",
+            progress: 0,
+            stage: "failed",
+            resultJson: JSON.stringify({ error: safeError })
+          });
+          rollbackUse(reservation);
+        }
+      })();
+    });
   }
 );
 
-app.get("/api/jobs", (request, response) => {
+app.get("/api/jobs", async (request, response) => {
   const { token, session } = ensureSession(request, response);
   const jobs = session.user_id
     ? db.prepare(
-      "SELECT id, workflow, kind, mode, status, progress, stage, poster, result_json, prompt, aspect_ratio, resolution, created_at FROM jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 50"
+      "SELECT id, owner_session, provider_id, workflow, kind, mode, status, progress, stage, poster, result_json, prompt, aspect_ratio, resolution, created_at FROM jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 50"
     ).all(session.user_id)
     : db.prepare(
-      "SELECT id, workflow, kind, mode, status, progress, stage, poster, result_json, prompt, aspect_ratio, resolution, created_at FROM jobs WHERE owner_session = ? ORDER BY created_at DESC LIMIT 50"
+      "SELECT id, owner_session, provider_id, workflow, kind, mode, status, progress, stage, poster, result_json, prompt, aspect_ratio, resolution, created_at FROM jobs WHERE owner_session = ? ORDER BY created_at DESC LIMIT 50"
     ).all(token);
-  const items = jobs.map((item) => {
-    let result = null;
+
+  const refreshable = jobs
+    .filter((job) => job.mode === "live" && job.provider_id && !["ready", "failed"].includes(job.status))
+    .slice(0, 5);
+  await Promise.all(refreshable.map(async (job) => {
     try {
-      result = item.result_json ? JSON.parse(item.result_json) : null;
+      await refreshProviderJob(job);
     } catch {
-      result = null;
+      // Keep the stored row available when a provider refresh is temporarily unavailable.
     }
-    const { result_json: _resultJson, ...safeItem } = item;
-    return {
-      ...safeItem,
-      video_url: result?.video_url || null,
-      images: result?.images || [],
-      error: result?.error || null
-    };
-  });
-  response.json({ items });
+  }));
+
+  response.json({ items: jobs.map(serializeStoredJob) });
 });
 
 app.get("/api/jobs/:id", async (request, response) => {
@@ -718,23 +790,26 @@ app.get("/api/jobs/:id", async (request, response) => {
     });
   }
 
-  try {
-    const providerJob = await readViggleJob({
-      apiKey,
-      providerId: job.provider_id,
-      kind: job.kind
+  if (job.mode === "live" && !job.provider_id) {
+    return response.json({
+      ...serializeStoredJob(job),
+      session: publicSession(session)
     });
-    if (providerJob.status === "ready" || providerJob.status === "failed") {
-      updateJob(job.id, {
-        status: providerJob.status,
-        progress: providerJob.progress || 0,
-        stage: providerJob.stage || providerJob.status,
-        resultJson: JSON.stringify(providerJob)
-      });
-    }
-    response.json({ ...providerJob, id: job.id, mode: "live", session: publicSession(session) });
+  }
+
+  try {
+    const providerJob = await refreshProviderJob(job, { allowTerminal: true });
+    response.json({
+      ...providerJob,
+      id: job.id,
+      workflow: job.workflow,
+      poster: job.poster,
+      created_at: job.created_at,
+      mode: "live",
+      session: publicSession(session)
+    });
   } catch (error) {
-    response.status(502).json({ error: error.message });
+    response.status(502).json({ error: safeErrorMessage(error, "Unable to refresh this render.") });
   }
 });
 

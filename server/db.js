@@ -331,9 +331,22 @@ export function getJob(id, ownerSession) {
 }
 
 export function updateJob(id, values) {
-  db.prepare(`
-    UPDATE jobs SET status = ?, progress = ?, stage = ?, result_json = ? WHERE id = ?
-  `).run(values.status, values.progress || 0, values.stage || null, values.resultJson || null, id);
+  const assignments = [];
+  const parameters = [];
+  const fields = [
+    ["status", "status"],
+    ["progress", "progress"],
+    ["stage", "stage"],
+    ["resultJson", "result_json"],
+    ["providerId", "provider_id"]
+  ];
+  for (const [key, column] of fields) {
+    if (!Object.hasOwn(values, key)) continue;
+    assignments.push(`${column} = ?`);
+    parameters.push(values[key]);
+  }
+  if (!assignments.length) return;
+  db.prepare(`UPDATE jobs SET ${assignments.join(", ")} WHERE id = ?`).run(...parameters, id);
 }
 
 export function saveWalletChallenge(address, nonce, message) {

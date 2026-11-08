@@ -16,15 +16,25 @@ test("both languages cover every creation tool", () => {
   }
 });
 
-test("Chinese UI covers community, pricing, studio, and account flows", () => {
+test("Chinese UI covers official samples, pricing, studio, and account flows", () => {
   const zh = UI_COPY.zh;
 
-  assert.match(zh.community.title, /社区/);
-  assert.match(zh.community.download, /下载/);
+  assert.match(zh.community.title, /官方示例/);
+  assert.match(zh.community.titleAccent, /动起来/);
+  assert.doesNotMatch(zh.community.title, /社区/);
+  assert.doesNotMatch(zh.community.titleAccent, /下载/);
   assert.match(zh.pricing.plans[1].name, /创作者/);
   assert.match(zh.studio.generate, /生成/);
   assert.match(zh.auth.signIn, /登录/);
   assert.match(zh.billing.unavailable, /支付/);
+  assert.ok(zh.community.official);
+  assert.ok(zh.community.emptyTitle);
+  assert.ok(zh.community.emptyText);
+  assert.equal(zh.studio.sceneRemakeTrialNote, "场景重制不包含在免费试用中。");
+  assert.ok(zh.billing.soon);
+  assert.equal(zh.auth.description, "保存项目，并在不同设备间保留你的试用记录。");
+  assert.equal(zh.studio.generateUnavailable, "暂时无法生成，请稍后再试。");
+  assert.equal(zh.studio.toasts.generateUnavailable, zh.studio.generateUnavailable);
 });
 
 test("legal routes have original MotionMint copy in both languages", () => {

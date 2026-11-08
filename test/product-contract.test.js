@@ -53,6 +53,15 @@ test("public status and health expose brand-neutral generation modes", async () 
   assert.doesNotMatch(status.message, FORBIDDEN_PUBLIC_MODEL);
 });
 
+test("unconfigured Google and wallet providers stay hidden", async () => {
+  const response = await fetch(`${baseUrl}/api/config`);
+  const config = await response.json();
+
+  assert.equal(config.googleOAuth, false);
+  assert.equal(config.wallet, false);
+  assert.equal(config.stripe, false);
+});
+
 test("public gallery contains only original MotionMint model labels", async () => {
   const response = await fetch(`${baseUrl}/api/public/gallery`);
   const payload = await response.json();

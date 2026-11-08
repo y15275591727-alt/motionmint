@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { visibleDownloadCount } from "./gallery.js";
 import { LEGAL_COPY, TOOL_COPY, UI_COPY } from "./i18n.js";
 import {
   Activity,
@@ -47,6 +48,12 @@ import {
 
 const TRIAL_WORKFLOWS = new Set(["mix", "motion", "video", "image"]);
 const LEGAL_PAGE_IDS = new Set(["privacy", "terms", "community-rules"]);
+const POLL_MAX_CONSECUTIVE_FAILURES = 3;
+const GENERATION_INPUT_HINTS = new Set([
+  "A prompt is required.",
+  "Add a character image to continue.",
+  "Add a motion or driving video to continue."
+]);
 
 function routeFromHash() {
   const hash = window.location.hash;
@@ -223,6 +230,76 @@ const GALLERY = [
 ];
 
 const GALLERY_TOOLS = ["mix", "mix", "motion", "video", "mix", "video", "motion", "image"];
+const GALLERY_STILLS = [
+  {
+    title: "Chrome Unit",
+    label: "3D character study",
+    image: "/images/three-d-04.jpg",
+    category: "Models"
+  },
+  {
+    title: "Polygon Muse",
+    label: "Stylized model",
+    image: "/images/stylized-01.jpg",
+    category: "Stylized"
+  }
+];
+
+const GALLERY_CATEGORY_ORDER = ["People", "Models", "Stylized", "Motion"];
+
+function officialGalleryFallback(copy) {
+  const samples = GALLERY.map((item, index) => {
+    const category = GALLERY_TOOLS[index] === "image" ? "Models" : "People";
+    return {
+      id: `official-${index + 1}`,
+      title: item.title,
+      description: item.label,
+      category,
+      media_type: item.video ? "video" : "image",
+      media_url: item.video || item.image,
+      poster_url: item.image,
+      author: copy.creator,
+      prompt: item.label,
+      aspect_ratio: "16:9",
+      resolution: "1080p",
+      model: "MotionMint Auto",
+      created_at: Date.UTC(2026, 9, 1 + index),
+      downloads: 0,
+      likes: 0,
+      featured: index < 4 ? 1 : 0
+    };
+  });
+  const stills = GALLERY_STILLS.map((item, index) => ({
+    id: `official-still-${index + 1}`,
+    title: item.title,
+    description: item.label,
+    category: item.category,
+    media_type: "image",
+    media_url: item.image,
+    poster_url: item.image,
+    author: copy.creator,
+    prompt: item.label,
+    aspect_ratio: "4:5",
+    resolution: "2K",
+    model: "MotionMint Auto",
+    created_at: Date.UTC(2026, 9, 20 + index),
+    downloads: 0,
+    likes: 0,
+    featured: 0
+  }));
+  return [...samples, ...stills];
+}
+
+function sortOfficialSamples(items) {
+  const rank = (category) => {
+    const index = GALLERY_CATEGORY_ORDER.indexOf(category);
+    return index === -1 ? GALLERY_CATEGORY_ORDER.length : index;
+  };
+  return [...items].sort(
+    (left, right) =>
+      rank(left.category) - rank(right.category)
+  );
+}
 
 const STUDIO_GALLERY = [
   { id: "midnight-run", image: "/images/scene-rave.jpg", video: "/videos/neon-dance-1.mp4", time: "00:13", tall: true },
@@ -266,7 +343,7 @@ const LANDING_COPY = {
     sectionTitle: "From a still image to a story that moves.",
     sectionText:
       "Six connected workflows. One clean studio. Keep characters, motions, prompts, and generated assets together.",
-    galleryEyebrow: "COMMUNITY SPARKS",
+    galleryEyebrow: "OFFICIAL SAMPLES",
     galleryTitle: "Made with a single idea.",
     speedEyebrow: "FAST BY DESIGN",
     speedTitle: "From first upload to first share.",
@@ -296,7 +373,7 @@ const LANDING_COPY = {
     sectionTitle: "从一张静态图片，到会讲故事的视频。",
     sectionText:
       "六个连贯的创作工具，一个简洁的工作台。统一管理角色、动作、提示词和生成素材。",
-    galleryEyebrow: "社区灵感",
+    galleryEyebrow: "官方示例",
     galleryTitle: "用一个想法，生成一整部作品。",
     speedEyebrow: "为速度而生",
     speedTitle: "从上传素材，到第一次分享。",
@@ -317,6 +394,30 @@ function publicModelLabel(model) {
   const label = String(model || "").trim();
   if (!label || /viggle/i.test(label)) return "MotionMint Auto";
   return label.startsWith("MotionMint") ? label : `MotionMint ${label}`;
+}
+
+function trialCountLabel(count, copy) {
+  const remaining = Math.max(0, Number(count) || 0);
+  return `${remaining} ${remaining === 1 ? copy.trialLeft : copy.trialsLeft}`;
+}
+
+function mergeLibraryItems(items, item) {
+  if (!item?.id) return items;
+  const existing = items.find((candidate) => candidate.id === item.id);
+  const withoutCurrent = items.filter((candidate) => candidate.id !== item.id);
+  return [{ ...existing, ...item }, ...withoutCurrent];
+}
+
+function replaceLibraryItem(items, previousId, item) {
+  if (!item?.id) return items;
+  const withoutPrevious = items.filter(
+    (candidate) => candidate.id !== previousId && candidate.id !== item.id
+  );
+  return [item, ...withoutPrevious];
+}
+
+function isActiveJob(item) {
+  return item?.status === "queued" || item?.status === "processing";
 }
 
 function motionClass(index) {
@@ -351,6 +452,10 @@ function Header({ lang, setLang, onStart, onAuth, compact = false, siteName = "M
         <a href="#motion">{text.nav[1]}</a>
         <a href="#community">{text.nav[2]}</a>
         <a href="#pricing">{text.nav[3]}</a>
+        <button className="site-nav-language" onClick={() => setLang(lang === "en" ? "zh" : "en")}>
+          <Globe2 size={16} />
+          {lang === "en" ? "中文" : "EN"}
+        </button>
       </nav>
       <div className="header-actions">
         <button className="language-button" onClick={() => setLang(lang === "en" ? "zh" : "en")}>
@@ -425,15 +530,10 @@ function Hero({ lang, onStart, siteSettings }) {
           <div className="hero-orbit orbit-two" />
           <div className="hero-glow" />
           <div className="hero-main-card">
-            <video
-              src="/videos/neon-dance-1.mp4"
-              poster="/images/hero-dancer.jpg"
+            <img
+              src="/images/character-one.jpg"
+              alt={copy.sourceImage}
               aria-label={copy.preview}
-              autoPlay
-              muted
-              loop
-              playsInline
-              preload="metadata"
             />
             <div className="scan-line" />
             <div className="hero-image-overlay" />
@@ -522,7 +622,7 @@ function ToolBento({ lang, onOpenTool }) {
             </div>
             <div className="equals-orbit"><ArrowRight size={17} /></div>
             <div className="duo-result">
-              <video src="/videos/neon-dance-1.mp4" poster="/images/hero-dancer.jpg" autoPlay muted loop playsInline preload="metadata" />
+              <img src="/images/character-one.jpg" alt={copy.motion} />
               <div className="video-pill"><Play size={11} fill="currentColor" /> {copy.motion}</div>
             </div>
           </div>
@@ -625,28 +725,20 @@ function Gallery({ lang }) {
   const text = LANDING_COPY[lang];
   const copy = UI_COPY[lang].gallery;
   const communityCopy = UI_COPY[lang].community;
-  const [items, setItems] = useState([]);
+  const [items, setItems] = useState(null);
   useEffect(() => {
     apiFetch("/api/public/gallery")
       .then((response) => response.json())
       .then((payload) => setItems(payload.items || []))
       .catch(() => setItems([]));
   }, []);
-  const displayItems = items.length
-    ? items
-    : GALLERY.map((item, index) => ({
-        id: item.title,
-        title: item.title,
-        description: item.label,
-        category: GALLERY_TOOLS[index] === "video" ? "Motion" : "People",
-        media_type: "video",
-        media_url: item.video,
-        poster_url: item.image,
-        author: communityCopy.creator
-      }));
-  const toolFor = (item) => item.category === "Motion" ? "motion"
-    : item.category === "Models" ? "character"
-    : item.category === "Stylized" ? "image" : "mix";
+  const fallbackItems = useMemo(() => officialGalleryFallback(communityCopy), [communityCopy]);
+  const displayItems = useMemo(() => {
+    const people = sortOfficialSamples(items?.length ? items : fallbackItems)
+      .filter((item) => item.category === "People");
+    return (people.length ? people : sortOfficialSamples(fallbackItems).filter((item) => item.category === "People"))
+      .slice(0, 8);
+  }, [fallbackItems, items]);
   return (
     <section className="section gallery-section" id="gallery">
       <div className="section-row">
@@ -722,28 +814,33 @@ function TemplateRail({ lang, onOpenTool }) {
   );
 }
 
-function CommunityGallery({ lang, setLang, onExit, onUseInMix, siteSettings, initialItemId }) {
+function CommunityGallery({ lang, setLang, onStart, onUseInMix, siteSettings, initialItemId }) {
   const copy = UI_COPY[lang].community;
-  const [items, setItems] = useState([]);
-  const [filter, setFilter] = useState("All");
+  const [items, setItems] = useState(null);
+  const [filter, setFilter] = useState("People");
   const [selected, setSelected] = useState(null);
   const [notice, setNotice] = useState("");
+  const fallbackItems = useMemo(() => officialGalleryFallback(copy), [copy]);
+  const galleryItems = useMemo(
+    () => sortOfficialSamples(items?.length ? items : fallbackItems),
+    [fallbackItems, items]
+  );
 
   useEffect(() => {
     apiFetch("/api/public/gallery")
       .then((response) => response.json())
       .then((payload) => setItems(payload.items || []))
-      .catch(() => setNotice(copy.loadError));
-  }, [copy.loadError]);
+      .catch(() => setItems([]));
+  }, []);
 
   useEffect(() => {
-    if (initialItemId && items.length) {
-      setSelected(items.find((item) => item.id === initialItemId) || null);
+    if (initialItemId && galleryItems.length) {
+      setSelected(galleryItems.find((item) => item.id === initialItemId) || null);
     }
-  }, [initialItemId, items]);
+  }, [initialItemId, galleryItems]);
 
   const categories = ["All", "People", "Models", "Stylized", "Motion"];
-  const visible = filter === "All" ? items : items.filter((item) => item.category === filter);
+  const visible = filter === "All" ? galleryItems : galleryItems.filter((item) => item.category === filter);
 
   async function download(item) {
     try {
@@ -763,7 +860,7 @@ function CommunityGallery({ lang, setLang, onExit, onUseInMix, siteSettings, ini
 
   return (
     <div className="community-shell">
-      <Header lang={lang} setLang={setLang} onStart={onExit} onAuth={onExit} siteName={siteSettings?.siteName} />
+      <Header lang={lang} setLang={setLang} onStart={onStart} onAuth={onStart} siteName={siteSettings?.siteName} />
       <main className="community-main">
         <div className="community-hero">
           <div>
@@ -776,38 +873,53 @@ function CommunityGallery({ lang, setLang, onExit, onUseInMix, siteSettings, ini
           {categories.map((category) => (
             <button className={filter === category ? "active" : ""} key={category} onClick={() => setFilter(category)}>
               {category === "All" ? copy.all : copy.categories[category]}
-              <span>{category === "All" ? items.length : items.filter((item) => item.category === category).length}</span>
+              <span>{category === "All" ? galleryItems.length : galleryItems.filter((item) => item.category === category).length}</span>
             </button>
           ))}
         </div>
         <div className="community-grid">
-          {visible.map((item, index) => (
-            <button
-              className={`community-card community-card-${(index % 4) + 1}`}
-              key={item.id}
-              onClick={() => setSelected(item)}
-            >
-              {item.media_type === "video" ? (
-                <video src={item.media_url} poster={item.poster_url} muted loop playsInline autoPlay preload="metadata" />
-              ) : (
-                <img src={item.media_url} alt={item.title} />
-              )}
-              <span className="community-shade" />
-              <span className="community-type">
-                {item.media_type === "video" ? <Play size={10} fill="currentColor" /> : <ImageIcon size={10} />}
-                {item.media_type === "video" ? copy.video : copy.image}
-              </span>
-              {item.featured === 1 && <span className="community-featured">{copy.featured}</span>}
-              <span className="community-card-copy">
-                <small>{copy.categories[item.category] || item.category}</small>
-                <strong>{item.title}</strong>
-                <span>{item.author}</span>
-              </span>
-              <span className="community-downloads"><Download size={11} /> {item.downloads || 0}</span>
-            </button>
-          ))}
+          {visible.map((item, index) => {
+            const downloadCount = visibleDownloadCount(item.downloads);
+            return (
+              <button
+                className={`community-card community-card-${(index % 4) + 1}`}
+                key={item.id}
+                onClick={() => setSelected(item)}
+              >
+                {item.media_type === "video" ? (
+                  <video src={item.media_url} poster={item.poster_url} muted loop playsInline autoPlay preload="metadata" />
+                ) : (
+                  <img src={item.media_url} alt={item.title} />
+                )}
+                <span className="community-shade" />
+                <span className="community-type">
+                  {item.media_type === "video" ? <Play size={10} fill="currentColor" /> : <ImageIcon size={10} />}
+                  {item.media_type === "video" ? copy.video : copy.image}
+                </span>
+                {item.featured === 1 && <span className="community-featured">{copy.featured}</span>}
+                <span className="community-official">{copy.official}</span>
+                <span className="community-card-copy">
+                  <small>{copy.categories[item.category] || item.category}</small>
+                  <strong>{item.title}</strong>
+                  <span>{item.author}</span>
+                </span>
+                {downloadCount !== null && (
+                  <span className="community-downloads"><Download size={11} /> {downloadCount}</span>
+                )}
+              </button>
+            );
+          })}
         </div>
-        {visible.length === 0 && <p className="collection-empty">{copy.empty}</p>}
+        {visible.length === 0 && (
+          <div className="collection-empty">
+            <strong>{copy.emptyTitle}</strong>
+            <p>{copy.emptyText}</p>
+            <button className="button button-primary button-small" onClick={() => onStart("mix")}>
+              {UI_COPY[lang].footer.action}
+              <ArrowRight size={15} />
+            </button>
+          </div>
+        )}
       </main>
       {selected && (
         <div className="community-viewer" onMouseDown={() => setSelected(null)}>
@@ -993,7 +1105,7 @@ function Footer({ lang, onStart, siteSettings }) {
         <span className="eyebrow">{copy.turn}</span>
         <h2>{landing.finalTitle}</h2>
         <p>{landing.finalText}</p>
-        <button className="button button-dark button-large" onClick={() => onStart()}>
+        <button className="button button-primary button-large" onClick={() => onStart()}>
           {copy.action} <ArrowRight size={18} />
         </button>
       </div>
@@ -1032,15 +1144,10 @@ function Footer({ lang, onStart, siteSettings }) {
 }
 
 function Landing({ lang, setLang, onStart, onAuth, onCheckout, toast, siteSettings, signedIn }) {
-  const heroCopy = UI_COPY[lang].hero;
   return (
     <div className="site-shell">
       <Header lang={lang} setLang={setLang} onStart={onStart} onAuth={onAuth} siteName={siteSettings?.siteName} signedIn={signedIn} />
       <Hero lang={lang} onStart={onStart} siteSettings={siteSettings} />
-      <div className="logo-strip">
-        <span>{heroCopy.trustedByCreators}</span>
-        <div><strong>NOVA</strong><strong>PYXL</strong><strong>FORME</strong><strong>HYPER</strong><strong>MINT</strong></div>
-      </div>
       <ToolBento lang={lang} onOpenTool={onStart} />
       <MotionShowcase lang={lang} />
       <Gallery lang={lang} />
@@ -1167,7 +1274,7 @@ function ResultPanel({ tool, result, onDownload, onShare, showWatermark, copy })
   );
 }
 
-function StudioSidebar({ lang, activeTool, setActiveTool, credits, trialRemaining, trialLimit, onExit, onOpenLibrary, onInvite, onUpgrade }) {
+function StudioSidebar({ lang, activeTool, setActiveTool, credits, trialRemaining, trialEligible, onExit, onOpenLibrary, onInvite, onUpgrade }) {
   const copy = UI_COPY[lang].studio;
   const comingLabels = lang === "zh"
     ? { multitrack: "多轨编辑", studio3d: "3D 工作台", live: "实时换角" }
@@ -1202,7 +1309,7 @@ function StudioSidebar({ lang, activeTool, setActiveTool, credits, trialRemainin
             );
           })}
         </div>
-        <div className="nav-section">
+        <div className="nav-section nav-section-next">
           <span className="nav-label">{copy.next}</span>
           {COMING_TOOLS.map((tool) => {
             const Icon = tool.icon;
@@ -1217,15 +1324,15 @@ function StudioSidebar({ lang, activeTool, setActiveTool, credits, trialRemainin
       <div className="sidebar-bottom">
         <div className="credits-card">
           <div>
-            <span>{copy.availableCredits}</span>
-            <strong><Zap size={16} fill="currentColor" /> {credits}</strong>
-          </div>
-          <div className="trial-line">
-            <span>{copy.freeRenders}</span>
-            <strong>{trialRemaining} / {trialLimit}</strong>
+            <span>{trialEligible ? copy.freeRenders : copy.availableCredits}</span>
+            <strong>
+              {trialEligible
+                ? <><Sparkles size={16} /> {trialCountLabel(trialRemaining, copy)}</>
+                : <><Zap size={16} fill="currentColor" /> {credits}</>}
+            </strong>
           </div>
           <button onClick={onUpgrade}>{copy.upgrade}</button>
-          <small>{copy.freeRendersNote}</small>
+          <small>{trialEligible ? copy.freeRendersNote : copy.creditsPerRender}</small>
         </div>
         <button className="invite-card" onClick={onInvite}>
           <span className="invite-icon"><Gift size={17} /></span>
@@ -1265,6 +1372,10 @@ function StudioHeader({ lang, setLang, mode, session, onAuth, onLogout }) {
 
 function CreatorPanel({ lang, tool, files, setFile, form, setForm, onGenerate, onUseSample, loading, credits, trialRemaining }) {
   const copy = UI_COPY[lang].studio;
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  useEffect(() => {
+    setSettingsOpen(false);
+  }, [tool.id]);
   const hasRequiredFile = tool.mode === "prompt" || files.image;
   const promptRequired = tool.mode === "prompt" && !form.prompt.trim();
   const motionReady = Boolean(files.motion || form.templateMotion);
@@ -1273,6 +1384,12 @@ function CreatorPanel({ lang, tool, files, setFile, form, setForm, onGenerate, o
   const trialEligible = trialRemaining > 0 && trialWorkflow;
   const canAfford = trialEligible || credits >= tool.cost;
   const canGenerate = !loading && (needed || tool.mode === "prompt") && !promptRequired && canAfford;
+  const missingAssetsMessage = tool.mode === "duo"
+    ? !files.image && motionReady
+      ? copy.mixAssetsMissing
+      : !files.image ? copy.characterMissing : copy.motionMissing
+    : copy.assetsMissing;
+  const isSceneRemake = tool.id === "remake";
   const durationOptions = [
     ["5 sec", copy.durations.five],
     ["10 sec", copy.durations.ten],
@@ -1287,7 +1404,10 @@ function CreatorPanel({ lang, tool, files, setFile, form, setForm, onGenerate, o
           <h1>{tool.name}</h1>
           <p>{tool.description}</p>
         </div>
-        <span className="cost-chip"><Zap size={13} fill="currentColor" /> {tool.cost}</span>
+        <span className="cost-chip">
+          {trialEligible ? <Sparkles size={13} /> : <Zap size={13} fill="currentColor" />}
+          {trialEligible ? trialCountLabel(trialRemaining, copy) : `${tool.cost} ${copy.credits}`}
+        </span>
       </div>
 
       {tool.mode === "duo" && (
@@ -1302,11 +1422,14 @@ function CreatorPanel({ lang, tool, files, setFile, form, setForm, onGenerate, o
           />
           <span className="upload-join"><Plus size={15} /></span>
           <Dropzone
-            label={`${tool.motionLabel} · ${copy.optional}`}
+            label={copy.motionDropHint}
             accept="video/*"
             file={files.motion}
             preview={files.motionPreview}
-            onChange={(file) => setFile("motion", file)}
+            onChange={(file) => {
+              setFile("motion", file);
+              if (file) setForm({ ...form, templateMotion: "" });
+            }}
             copy={copy}
           />
         </div>
@@ -1336,7 +1459,7 @@ function CreatorPanel({ lang, tool, files, setFile, form, setForm, onGenerate, o
         <div className="motion-template-picker">
           <div className="motion-template-head">
             <span>{copy.trendingMotion}</span>
-            <small>{copy.motionSelected}</small>
+            <small>{files.motion || form.templateMotion ? copy.motionSelected : copy.motionChoose}</small>
           </div>
           <div className="motion-template-grid">
             {MOTION_TEMPLATES.map((template) => (
@@ -1396,9 +1519,17 @@ function CreatorPanel({ lang, tool, files, setFile, form, setForm, onGenerate, o
         </>
       )}
 
-      <div className="settings-block">
-        <div className="settings-head"><span><SlidersHorizontal size={15} /> {copy.settings}</span><Settings2 size={15} /></div>
-        <div className="settings-grid">
+      <div className={`settings-block ${settingsOpen ? "is-open" : ""}`}>
+        <button
+          type="button"
+          className="settings-head"
+          aria-expanded={settingsOpen}
+          onClick={() => setSettingsOpen((open) => !open)}
+        >
+          <span><SlidersHorizontal size={15} /> {copy.settings}</span>
+          <ChevronDown className={settingsOpen ? "is-open" : ""} size={15} />
+        </button>
+        {settingsOpen && <div className="settings-grid">
           <label>
             <span>{copy.model}</span>
             <select value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })}>
@@ -1446,7 +1577,7 @@ function CreatorPanel({ lang, tool, files, setFile, form, setForm, onGenerate, o
               ))}
             </select>
           </label>
-        </div>
+        </div>}
       </div>
 
       <div className="priority-row">
@@ -1454,30 +1585,46 @@ function CreatorPanel({ lang, tool, files, setFile, form, setForm, onGenerate, o
           <span className="priority-icon"><Zap size={16} /></span>
           <span><strong>{copy.priority}</strong><small>{copy.priorityNote}</small></span>
         </div>
-        <button className="toggle active" aria-pressed="true" aria-label={copy.priority}><span /></button>
+        <button
+          type="button"
+          className={`toggle ${form.priority ? "active" : ""}`}
+          aria-pressed={form.priority}
+          aria-label={copy.priority}
+          onClick={() => setForm({ ...form, priority: !form.priority })}
+        >
+          <span />
+        </button>
       </div>
 
       <button className="generate-button" onClick={onGenerate} disabled={!canGenerate}>
         {loading ? <LoaderCircle className="spin" size={18} /> : <Sparkles size={18} />}
         {loading ? copy.generating : trialEligible ? copy.generateFree : copy.generate}
-        {!loading && <span>{trialEligible ? `${trialRemaining} ${copy.trialLeft}` : `${tool.cost} ${copy.credits}`}</span>}
+        {!loading && <span>{trialEligible ? trialCountLabel(trialRemaining, copy) : `${tool.cost} ${copy.credits}`}</span>}
       </button>
-      {!canAfford && !loading && (
+      {!canAfford && !loading && !isSceneRemake && (
         <p className="form-error">{trialWorkflow ? copy.trialExpired : copy.creditsRequired}</p>
       )}
+      {isSceneRemake && !loading && <p className="form-note">{copy.sceneRemakeTrialNote}</p>}
       {!needed && !loading && (
-        <p className="form-hint">
-          {tool.id === "mix"
-            ? copy.mixAssetsMissing
-            : copy.assetsMissing}
-        </p>
+        <p className="form-hint">{missingAssetsMessage}</p>
       )}
     </section>
   );
 }
 
-function WorkspacePreview({ lang, tool, result, job, progress, stage, onDownload, onShare, onOpenLibrary, onOpenGalleryItem, onViewGallery, showWatermark }) {
+function WorkspacePreview({ lang, tool, files, form, result, job, progress, stage, onDownload, onShare, onOpenLibrary, onOpenGalleryItem, onViewGallery, showWatermark, trialEligible, trialRemaining }) {
   const copy = UI_COPY[lang].studio;
+  const sourcePreview = tool.mode === "prompt" ? files.referencePreview : files.imagePreview;
+  const selectedTemplate = MOTION_TEMPLATES.find((template) => template.file === form.templateMotion);
+  const motionPreview = files.motionPreview || (!files.motion && form.templateMotion ? `/videos/${form.templateMotion}` : "");
+  const assetsReady = tool.mode === "duo" ? Boolean(sourcePreview && motionPreview)
+    : tool.mode === "single" ? Boolean(sourcePreview)
+    : true;
+  const missingAssetsCopy = !sourcePreview && !motionPreview
+    ? copy.duoEmpty
+    : !sourcePreview
+      ? copy.mixAssetsMissing
+      : copy.motionMissing;
   return (
     <section className="workspace-preview">
       <div className="preview-tabs">
@@ -1492,21 +1639,37 @@ function WorkspacePreview({ lang, tool, result, job, progress, stage, onDownload
         <div className="empty-preview">
           <div className="empty-stage" aria-label={copy.sourceMotionResult}>
             <div className="empty-stage-node">
-              <div className="empty-stage-media">
-                <img src="/images/character-one.jpg" alt="" />
+              <div className={`empty-stage-media ${sourcePreview ? "" : "placeholder"}`}>
+                {sourcePreview ? (
+                  <img src={sourcePreview} alt={copy.source} />
+                ) : (
+                  <div className="empty-grid" />
+                )}
                 <span className="empty-stage-index">01</span>
               </div>
               <strong>{copy.source}</strong>
-              <small>{copy.sourceStageNote}</small>
+              <small>{sourcePreview ? copy.assetReady : copy.sourceStageNote}</small>
             </div>
             <span className="empty-stage-arrow"><Plus size={14} /></span>
             <div className="empty-stage-node">
-              <div className="empty-stage-media">
-                <video src="/videos/neon-dance-1.mp4" poster="/images/scene-rave.jpg" muted loop autoPlay playsInline preload="metadata" />
+              <div className={`empty-stage-media ${motionPreview ? "" : "placeholder"}`}>
+                {motionPreview ? (
+                  <video
+                    src={motionPreview}
+                    poster={files.motion ? undefined : selectedTemplate?.poster}
+                    muted
+                    loop
+                    autoPlay
+                    playsInline
+                    preload="metadata"
+                  />
+                ) : (
+                  <div className="empty-grid" />
+                )}
                 <span className="empty-stage-index">02</span>
               </div>
               <strong>{copy.motion}</strong>
-              <small>{copy.motionStageNote}</small>
+              <small>{motionPreview ? copy.assetReady : copy.motionStageNote}</small>
             </div>
             <span className="empty-stage-arrow"><ArrowRight size={14} /></span>
             <div className="empty-stage-node result">
@@ -1519,13 +1682,20 @@ function WorkspacePreview({ lang, tool, result, job, progress, stage, onDownload
               <small>{copy.resultStageNote}</small>
             </div>
           </div>
-          <h2>{tool.id === "image" ? copy.imageEmptyTitle : copy.sceneEmptyTitle}</h2>
+          <h2>
+            {assetsReady && tool.mode !== "prompt"
+              ? copy.workspaceReadyTitle
+              : tool.id === "image" ? copy.imageEmptyTitle : copy.sceneEmptyTitle}
+          </h2>
           <p>
-            {tool.mode === "duo"
-              ? copy.duoEmpty
-              : copy.promptEmpty}
+            {assetsReady && tool.mode !== "prompt"
+              ? copy.workspaceReadyText
+              : tool.mode === "prompt" ? copy.promptEmpty : missingAssetsCopy}
           </p>
-          <span className="empty-badge"><Zap size={13} /> {tool.cost} {copy.creditsPerRender}</span>
+          <span className="empty-badge">
+            {trialEligible ? <Sparkles size={13} /> : <Zap size={13} />}
+            {trialEligible ? trialCountLabel(trialRemaining, copy) : `${tool.cost} ${copy.creditsPerRender}`}
+          </span>
         </div>
       )}
       <div className="studio-gallery">
@@ -1582,7 +1752,8 @@ function Studio({ lang, setLang, onExit, onToast, session, onSessionChange, onAu
     duration: "5 sec",
     resolution: "1080p",
     background: "Original scene",
-    templateMotion: "neon-dance-1.mp4"
+    templateMotion: "",
+    priority: false
   });
   const [job, setJob] = useState("idle");
   const [progress, setProgress] = useState(0);
@@ -1617,17 +1788,17 @@ function Studio({ lang, setLang, onExit, onToast, session, onSessionChange, onAu
     if (!prefill?.url) return;
     apiFetch(prefill.url)
       .then(async (response) => {
-        if (!response.ok) throw new Error("Community image could not be loaded.");
+        if (!response.ok) throw new Error(copy.toasts.sampleLoadFailed);
         const blob = await response.blob();
         setFile("image", new File(
           [blob],
-          prefill.filename || "motionmint-community.jpg",
+          prefill.filename || "official-sample.jpg",
           { type: blob.type || "image/jpeg" }
         ));
         if (prefill.prompt) {
           setForm((current) => ({ ...current, prompt: prefill.prompt }));
         }
-        onToast("Community portrait loaded. Pick a motion and generate.");
+        onToast(copy.toasts.communityLoaded);
       })
       .catch((error) => onToast(error.message));
   }, []);
@@ -1640,11 +1811,45 @@ function Studio({ lang, setLang, onExit, onToast, session, onSessionChange, onAu
     window.clearInterval(pollRef.current);
   }, [initialToolId]);
 
+  const activeLibraryJobIds = libraryItems
+    .filter((item) => isActiveJob(item) && !String(item.id).startsWith("pending_"))
+    .map((item) => item.id);
+  const activeLibraryJobKey = activeLibraryJobIds.join("|");
+
+  useEffect(() => {
+    if (!libraryOpen || !activeLibraryJobKey) return undefined;
+    let cancelled = false;
+
+    async function refreshOpenLibrary() {
+      await Promise.allSettled(activeLibraryJobIds.map(async (id) => {
+        try {
+          const response = await apiFetch(`/api/jobs/${encodeURIComponent(id)}`);
+          const payload = await response.json();
+          if (!response.ok || cancelled) return;
+          setLibraryItems((current) => mergeLibraryItems(current, payload));
+        } catch {
+          // Keep the stored library row and try again on the next refresh.
+        }
+      }));
+    }
+
+    void refreshOpenLibrary();
+    const interval = window.setInterval(() => {
+      void refreshOpenLibrary();
+    }, 1800);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [activeLibraryJobKey, libraryOpen]);
+
   const credits = Number(session?.credits || 0);
   const trialRemaining = Number(session?.trialRemaining || 0);
-  const trialLimit = Number(siteSettings?.trialLimit || 3);
   const copy = UI_COPY[lang].studio;
   const displayTool = localizedTool(activeTool, lang);
+  const trialEligible = trialRemaining > 0 && TRIAL_WORKFLOWS.has(activeTool.id);
+  const hasActiveLibraryItems = libraryItems.some(isActiveJob);
+  const shouldShowLibraryEmpty = !libraryLoading && !hasActiveLibraryItems && libraryItems.length === 0;
 
   function setFile(field, file) {
     const key = `${field}Preview`;
@@ -1662,10 +1867,25 @@ function Studio({ lang, setLang, onExit, onToast, session, onSessionChange, onAu
       else onCheckout("creator");
       return;
     }
+    window.clearInterval(pollRef.current);
+    const pendingId = `pending_${Date.now()}_${crypto.randomUUID()}`;
+    const pendingItem = {
+      id: pendingId,
+      workflow: activeTool.id,
+      kind: activeTool.id === "image" ? "images" : "video",
+      mode: apiMode,
+      status: "processing",
+      progress: 4,
+      stage: "analyzing",
+      poster: files.imagePreview || files.referencePreview || "",
+      prompt: form.prompt,
+      created_at: Date.now()
+    };
     setJob("processing");
     setProgress(4);
     setStage("analyzing");
     setResult(null);
+    setLibraryItems((current) => mergeLibraryItems(current, pendingItem));
     const data = new FormData();
     data.append("workflow", activeTool.id);
     data.append("prompt", form.prompt);
@@ -1683,6 +1903,7 @@ function Studio({ lang, setLang, onExit, onToast, session, onSessionChange, onAu
     );
     data.append("background", form.background === "Original scene" ? "original" : form.background.toLowerCase());
     data.append("templateMotion", form.templateMotion || "");
+    data.append("priority", String(form.priority));
     if (files.image) data.append("image", files.image);
     if (files.motion) data.append("motion", files.motion);
     if (files.reference) data.append("reference", files.reference);
@@ -1692,39 +1913,108 @@ function Studio({ lang, setLang, onExit, onToast, session, onSessionChange, onAu
       const payload = await response.json();
       if (payload.session) onSessionChange(payload.session);
       if (!response.ok) {
-        if (payload.code === "PAYMENT_REQUIRED") onAuth();
-        throw new Error(payload.error || "Generation failed.");
+        setJob("idle");
+        setProgress(0);
+        setStage("failed");
+        if (payload.code === "PAYMENT_REQUIRED") {
+          onAuth();
+          setLibraryItems((current) => current.filter((item) => item.id !== pendingId));
+          onToast(payload.error || copy.toasts.generateUnavailable);
+          return;
+        }
+        const inputHint = String(payload.error || "").trim();
+        if (GENERATION_INPUT_HINTS.has(inputHint)) {
+          setLibraryItems((current) => current.filter((item) => item.id !== pendingId));
+          onToast(inputHint);
+          return;
+        }
+        const unavailableItem = {
+          ...pendingItem,
+          status: "failed",
+          progress: 0,
+          stage: "failed",
+          error: {
+            code: "GENERATE_UNAVAILABLE",
+            message: copy.generateUnavailable
+          }
+        };
+        setLibraryItems((current) => replaceLibraryItem(current, pendingId, unavailableItem));
+        onToast(copy.toasts.generateUnavailable);
+        return;
       }
 
-      pollRef.current = window.setInterval(async () => {
+      const acceptedItem = {
+        ...pendingItem,
+        id: payload.id,
+        status: payload.status || "processing",
+        progress: Number(payload.progress) || 0,
+        stage: payload.stage || "analyzing",
+        mode: payload.mode || pendingItem.mode,
+        created_at: payload.created_at || pendingItem.created_at
+      };
+      setLibraryItems((current) => replaceLibraryItem(current, pendingId, acceptedItem));
+      setApiMode(payload.mode || apiMode);
+      let consecutivePollFailures = 0;
+
+      async function pollJob() {
         try {
           const jobResponse = await apiFetch(`/api/jobs/${payload.id}`);
           const jobData = await jobResponse.json();
           if (!jobResponse.ok) throw new Error(jobData.error || "Unable to read the render.");
-          setProgress(jobData.progress || 0);
+          consecutivePollFailures = 0;
+          setProgress(Number(jobData.progress) || 0);
           setStage(jobData.stage || "rendering");
+          setLibraryItems((current) => mergeLibraryItems(current, jobData));
           if (jobData.status === "ready") {
             window.clearInterval(pollRef.current);
-            setResult(jobData);
+            setResult({ ...acceptedItem, ...jobData, id: payload.id });
             setProgress(100);
+            setStage("finishing");
             setJob("ready");
-            onToast(apiMode === "live" ? copy.toasts.renderReady : copy.toasts.demoComplete);
+            onToast(payload.mode === "live" ? copy.toasts.renderReady : copy.toasts.demoComplete);
+            return;
           }
           if (jobData.status === "failed") {
             window.clearInterval(pollRef.current);
             setJob("idle");
-            onSessionChange(await loadSessionState());
-            throw new Error(jobData.error?.message || "Render failed. Credits were returned.");
+            try {
+              onSessionChange(await loadSessionState());
+            } catch {
+              // The failed render remains visible even if the session refresh is unavailable.
+            }
+            onToast(copy.toasts.generateUnavailable);
+            return;
           }
+          setJob("processing");
         } catch (error) {
+          consecutivePollFailures += 1;
+          if (consecutivePollFailures < POLL_MAX_CONSECUTIVE_FAILURES) return;
           window.clearInterval(pollRef.current);
           setJob("idle");
-          onToast(error.message);
+          onToast(copy.toasts.generateUnavailable);
         }
+      }
+
+      pollRef.current = window.setInterval(() => {
+        void pollJob();
       }, 900);
+      void pollJob();
     } catch (error) {
       setJob("idle");
-      onToast(error.message);
+      setProgress(0);
+      setStage("failed");
+      const unavailableItem = {
+        ...pendingItem,
+        status: "failed",
+        progress: 0,
+        stage: "failed",
+        error: {
+          code: "GENERATE_UNAVAILABLE",
+          message: copy.generateUnavailable
+        }
+      };
+      setLibraryItems((current) => replaceLibraryItem(current, pendingId, unavailableItem));
+      onToast(copy.toasts.generateUnavailable);
     }
   }
 
@@ -1765,7 +2055,19 @@ function Studio({ lang, setLang, onExit, onToast, session, onSessionChange, onAu
       const response = await apiFetch("/api/jobs");
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "Library could not be loaded.");
-      setLibraryItems(payload.items || []);
+      setLibraryItems((current) => {
+        let items = payload.items || [];
+        const apiIds = new Set(items.map((item) => item.id));
+        const localCandidates = [...current, ...libraryItems, result]
+          .filter((item) => item?.id && (isActiveJob(item) || item.status === "ready"));
+        for (const localItem of localCandidates) {
+          if (!apiIds.has(localItem.id)) {
+            items = mergeLibraryItems(items, localItem);
+            apiIds.add(localItem.id);
+          }
+        }
+        return items;
+      });
     } catch (error) {
       onToast(error.message);
     } finally {
@@ -1797,13 +2099,14 @@ function Studio({ lang, setLang, onExit, onToast, session, onSessionChange, onAu
     try {
       const imageResponse = await apiFetch("/images/character-one.jpg");
       const imageBlob = await imageResponse.blob();
-      const imageFile = new File([imageBlob], "motionmint-character.jpg", { type: imageBlob.type || "image/jpeg" });
+      const imageFile = new File([imageBlob], copy.demoCharacterFile, { type: imageBlob.type || "image/jpeg" });
       setFile("image", imageFile);
       if (activeTool.mode === "duo") {
         const motionResponse = await apiFetch("/videos/neon-dance-2.mp4");
         const motionBlob = await motionResponse.blob();
-        const motionFile = new File([motionBlob], "motionmint-motion.mp4", { type: motionBlob.type || "video/mp4" });
+        const motionFile = new File([motionBlob], copy.demoMotionFile, { type: motionBlob.type || "video/mp4" });
         setFile("motion", motionFile);
+        setForm((current) => ({ ...current, templateMotion: "" }));
       }
       onToast("Demo assets loaded. Generate is now ready.");
     } catch {
@@ -1819,7 +2122,7 @@ function Studio({ lang, setLang, onExit, onToast, session, onSessionChange, onAu
         setActiveTool={setActiveTool}
         credits={credits}
         trialRemaining={trialRemaining}
-        trialLimit={trialLimit}
+        trialEligible={trialEligible}
         onExit={onExit}
         onOpenLibrary={openLibrary}
         onInvite={openReferral}
@@ -1867,11 +2170,15 @@ function Studio({ lang, setLang, onExit, onToast, session, onSessionChange, onAu
           <WorkspacePreview
             lang={lang}
             tool={displayTool}
+            files={files}
+            form={form}
             job={job}
             progress={progress}
             stage={stage}
             result={result}
             showWatermark={siteSettings?.watermarkEnabled !== false && session?.plan === "free"}
+            trialEligible={trialEligible}
+            trialRemaining={trialRemaining}
             onOpenLibrary={openLibrary}
             onOpenGalleryItem={(id) => { window.location.hash = `community/${id}`; }}
             onViewGallery={() => { window.location.hash = "community"; }}
@@ -1921,14 +2228,17 @@ function Studio({ lang, setLang, onExit, onToast, session, onSessionChange, onAu
                       <div>
                         <strong>{TOOL_DEFINITIONS.find((tool) => tool.id === item.workflow)?.name || item.workflow}</strong>
                         <small>{new Date(Number(item.created_at)).toLocaleString()}</small>
+                        {item.status === "failed" && (
+                          <small className="library-error">{copy.generateUnavailable}</small>
+                        )}
                       </div>
                     </article>
                   );
                 })}
               </div>
-            ) : (
+            ) : shouldShowLibraryEmpty ? (
               <div className="library-empty"><Folder size={22} /> Your first finished render will appear here.</div>
-            )}
+            ) : null}
           </div>
         </div>
       )}
@@ -2052,24 +2362,24 @@ function AuthModal({ lang, open, onClose, onSuccess, onToast, providers }) {
           {copy.description}
         </p>
 
-        <button
-          className="auth-provider"
-          disabled={busy !== ""}
-          onClick={() => {
-            if (!providers.googleOAuth) {
-              onToast(copy.googleUnavailable);
-              return;
-            }
-            window.location.href = "/api/auth/google/start";
-          }}
-        >
-          <span className="provider-g">G</span>
-          {copy.google}
-        </button>
-        <button className="auth-provider" onClick={connectWallet} disabled={busy !== ""}>
-          {busy === "wallet" ? <Loader2 className="spin" size={18} /> : <Wallet size={18} />}
-          {copy.wallet}
-        </button>
+        {providers.googleOAuth && (
+          <button
+            className="auth-provider"
+            disabled={busy !== ""}
+            onClick={() => {
+              window.location.href = "/api/auth/google/start";
+            }}
+          >
+            <span className="provider-g">G</span>
+            {copy.google}
+          </button>
+        )}
+        {providers.wallet && (
+          <button className="auth-provider" onClick={connectWallet} disabled={busy !== ""}>
+            {busy === "wallet" ? <Loader2 className="spin" size={18} /> : <Wallet size={18} />}
+            {copy.wallet}
+          </button>
+        )}
 
         <div className="auth-divider"><span>{copy.divider}</span></div>
 
@@ -2110,10 +2420,10 @@ function AuthModal({ lang, open, onClose, onSuccess, onToast, providers }) {
           </button>
         </form>
 
+        <button className="button button-ghost button-block auth-guest" onClick={onClose}>{copy.guest}</button>
         <button className="auth-switch" onClick={() => { setRegister(!register); setError(""); }}>
           {register ? copy.switchToSignIn : copy.switchToRegister}
         </button>
-        <button className="auth-guest" onClick={onClose}>{copy.guest}</button>
         <small className="auth-terms">
           {hasLegalLinks ? (
             <>
@@ -2592,7 +2902,7 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [authOpen, setAuthOpen] = useState(false);
   const [pendingPlan, setPendingPlan] = useState(null);
-  const [providers, setProviders] = useState({ googleOAuth: false, wallet: true, stripe: false });
+  const [providers, setProviders] = useState({ googleOAuth: false, wallet: false, stripe: false });
   const [siteSettings, setSiteSettings] = useState({ siteName: "MotionMint", heroTitle: "Make anyone move." });
 
   useEffect(() => {
@@ -2636,7 +2946,9 @@ export default function App() {
         setSiteSettings(siteData);
         const params = new URLSearchParams(window.location.search);
         if (params.get("auth_error")) showToast(params.get("auth_error"));
-        if (params.get("billing") === "success") showToast("Payment completed. Your credits will appear after the webhook confirms.");
+        if (params.get("billing") === "success" && configData.stripe) {
+          showToast("Payment completed. Your credits will appear after the webhook confirms.");
+        }
       })
       .catch(() => {
         setSession({ guest: true, trialRemaining: 3, credits: 0, user: null });
@@ -2663,6 +2975,10 @@ export default function App() {
   }
 
   async function checkout(product, overrideSession = session) {
+    if (!providers.stripe) {
+      showToast(UI_COPY[lang].billing.soon);
+      return;
+    }
     if (!overrideSession?.user) {
       setPendingPlan(product);
       setAuthOpen(true);
@@ -2707,7 +3023,7 @@ export default function App() {
     return (
       <CommunityGallery
         {...sharedProps}
-        onExit={exitStudio}
+        onStart={(toolId = "mix") => enterStudio(toolId)}
         siteSettings={siteSettings}
         initialItemId={communityItemId}
         onUseInMix={(item) => {
